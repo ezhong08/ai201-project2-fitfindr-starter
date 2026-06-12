@@ -198,11 +198,11 @@ You're done. The caller (Gradio UI) reads `session["error"]` first — if it's n
 
 For each tool, describe the specific failure mode you're handling and what the agent does in response.
 
-| Tool | Failure mode | What the tool does | What the agent does with it | What the user sees |
-|------|-------------|-------------------|---------------------------|-------------------|
-| search_listings | No results match the query | Returns `[]` — the empty list. Does not raise an exception. | Checks `if not session["search_results"]:` after the call. Sets `session["error"] = "Sorry — no listings matched 'vintage graphic tee' under $30. Try a broader description or a higher budget."` and returns the session immediately. `suggest_outfit` and `create_fit_card` are never called. | The Gradio UI sees `session["error"]` is not `None` and displays the error message in the first panel. The other two panels are blank — the user gets a clear failure with a concrete next step ("try a broader description or a higher budget"). |
-| suggest_outfit | Wardrobe is empty | Detects `wardrobe["items"]` is empty. Instead of erroring, it builds a different LLM prompt: "The user doesn't have any wardrobe items yet. Suggest general pairings and vibes for this piece — what kinds of bottoms, shoes, and layers would work with it?" Returns the LLM's response as a non-empty string. | Does not branch. The agent calls `suggest_outfit` and stores whatever string comes back into `session["outfit_suggestion"]`, then passes it to `create_fit_card` as usual. If the LLM call itself fails (API error, timeout), the tool catches the exception and returns the fallback string `"Try pairing this with your favorite jeans and sneakers for an easy everyday look."` — the agent stores that and continues. | The outfit panel shows general styling advice rather than specific wardrobe piece names. It still feels helpful: "A vintage graphic tee pairs well with relaxed denim and chunky sneakers for a 90s streetwear vibe." The fit card still generates. |
-| create_fit_card | Outfit input is missing or incomplete | Checks `if not outfit or not outfit.strip():` at the top. Returns `"Couldn't generate a fit card — the outfit suggestion was empty."` immediately — no LLM call, no exception. | Does not branch. The agent calls `create_fit_card` and stores whatever string comes back into `session["fit_card"]`. If the outfit was empty, that string is the error message. | The fit card panel displays the error message: `"Couldn't generate a fit card — the outfit suggestion was empty."` The listing and outfit panels still show their content — only the fit card is affected. |
+| Tool            | Failure mode                          | What the tool does                                                                                                                                                                                                                                                                                              | What the agent does with it                                                                                                                                                                                                                                                                                                                                                                                               | What the user sees                                                                                                                                                                                                                                  |
+| --------------- | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| search_listings | No results match the query            | Returns `[]` — the empty list. Does not raise an exception.                                                                                                                                                                                                                                                     | Checks `if not session["search_results"]:` after the call. Sets `session["error"] = "Sorry — no listings matched 'vintage graphic tee' under $30. Try a broader description or a higher budget."` and returns the session immediately. `suggest_outfit` and `create_fit_card` are never called.                                                                                                                           | The Gradio UI sees `session["error"]` is not `None` and displays the error message in the first panel. The other two panels are blank — the user gets a clear failure with a concrete next step ("try a broader description or a higher budget").   |
+| suggest_outfit  | Wardrobe is empty                     | Detects `wardrobe["items"]` is empty. Instead of erroring, it builds a different LLM prompt: "The user doesn't have any wardrobe items yet. Suggest general pairings and vibes for this piece — what kinds of bottoms, shoes, and layers would work with it?" Returns the LLM's response as a non-empty string. | Does not branch. The agent calls `suggest_outfit` and stores whatever string comes back into `session["outfit_suggestion"]`, then passes it to `create_fit_card` as usual. If the LLM call itself fails (API error, timeout), the tool catches the exception and returns the fallback string `"Try pairing this with your favorite jeans and sneakers for an easy everyday look."` — the agent stores that and continues. | The outfit panel shows general styling advice rather than specific wardrobe piece names. It still feels helpful: "A vintage graphic tee pairs well with relaxed denim and chunky sneakers for a 90s streetwear vibe." The fit card still generates. |
+| create_fit_card | Outfit input is missing or incomplete | Checks `if not outfit or not outfit.strip():` at the top. Returns `"Couldn't generate a fit card — the outfit suggestion was empty."` immediately — no LLM call, no exception.                                                                                                                                  | Does not branch. The agent calls `create_fit_card` and stores whatever string comes back into `session["fit_card"]`. If the outfit was empty, that string is the error message.                                                                                                                                                                                                                                           | The fit card panel displays the error message: `"Couldn't generate a fit card — the outfit suggestion was empty."` The listing and outfit panels still show their content — only the fit card is affected.                                          |
 
 ---
 
@@ -330,7 +330,7 @@ A working `suggest_outfit()` function that:
 1. Checks `if not wardrobe["items"]:` to detect the empty wardrobe case
 2. **If wardrobe is empty:** builds a prompt asking the LLM for general styling advice — what kinds of items pair well with the new item, what vibe it suits, what occasions it works for. Does NOT hallucinate specific wardrobe pieces the user doesn't own.
 3. **If wardrobe has items:** formats each wardrobe piece (name, category, colors, style_tags, notes) into a bullet list, then builds a prompt asking the LLM to suggest 1–2 specific outfit combinations using the new item and named wardrobe pieces
-4. Calls the Groq LLM via `_get_groq_client()` (e.g., `client.chat.completions.create(model="llama-3.1-8b-instant", messages=[...])`)
+4. Calls the Groq LLM via `_get_groq_client()` (e.g., `client.chat.completions.create(model="llama-3.3-70b-versatile", messages=[...])`)
 5. Returns the LLM's response text as a string — never an empty string
 6. Wraps the LLM call in a `try/except` — if the API fails (network error, auth error, timeout), returns a hardcoded fallback string like `"Try pairing this with your favorite jeans and sneakers for an easy everyday look."`
 
@@ -481,6 +481,7 @@ session["parsed"] = {
 **Step 2 — search_listings is called.**
 
 Exact call:
+
 ```python
 session["search_results"] = search_listings(
     description="vintage graphic tee",
@@ -490,6 +491,7 @@ session["search_results"] = search_listings(
 ```
 
 What the tool does internally:
+
 1. Calls `load_listings()` → receives all 40 listing dicts
 2. Drops any listing with `price > 30.0` (removes listings priced $32–$75)
 3. Skips size filter since `size is None`
@@ -545,6 +547,7 @@ What it returns — a list of 3 matching listings:
 ```
 
 **Failure path — if search returned nothing:**
+
 ```python
 if not session["search_results"]:
     session["error"] = (
@@ -553,6 +556,7 @@ if not session["search_results"]:
     )
     return session    # ← exits here. Steps 3–6 are skipped entirely.
 ```
+
 The user would see: the error message in the first panel, blank panels for outfit and fit card. There is nothing to style yet, so the agent doesn't try.
 
 ---
@@ -570,6 +574,7 @@ This is the Vintage Band Tee ($22, depop) — it had the highest score because `
 **Step 4 — suggest_outfit is called.**
 
 Exact call:
+
 ```python
 session["outfit_suggestion"] = suggest_outfit(
     new_item=session["selected_item"],   # the Vintage Band Tee dict
@@ -578,12 +583,14 @@ session["outfit_suggestion"] = suggest_outfit(
 ```
 
 What the tool does internally:
+
 1. Checks `wardrobe["items"]` — it's not empty (contains `"Baggy straight-leg jeans, dark wash"` and `"Chunky white sneakers"` and 8 other items)
 2. Builds an LLM prompt listing every wardrobe piece by name, category, colors, and style_tags
 3. Asks the LLM: "Suggest 1–2 outfits pairing the Vintage Band Tee with items from this wardrobe. Name specific pieces."
 4. Calls Groq and returns the response
 
 What it returns — a single string:
+
 ```
 Pair the Vintage Band Tee with your baggy straight-leg jeans for a relaxed
 90s-grunge silhouette. Layer with the vintage black denim jacket if it's
@@ -599,6 +606,7 @@ The tool would detect `wardrobe["items"]` is empty and ask the LLM: "The user do
 **Step 5 — create_fit_card is called.**
 
 Exact call:
+
 ```python
 session["fit_card"] = create_fit_card(
     outfit=session["outfit_suggestion"],   # the string from Step 4
@@ -607,12 +615,14 @@ session["fit_card"] = create_fit_card(
 ```
 
 What the tool does internally:
+
 1. Checks `if not outfit or not outfit.strip():` — the outfit string is non-empty, so the guard passes
 2. Extracts `title="Vintage Band Tee — The Smiths 1987 Tour"`, `price=22.00`, `platform="depop"`, `style_tags=["vintage", "graphic tee", "band", "90s", "grunge"]`
 3. Builds an LLM prompt with those details plus the outfit text, with instructions: "Write a 2–4 sentence Instagram/TikTok caption. Mention the item name, price ($22), and platform (depop) naturally. Capture the 90s-grunge vibe. Sound like a real person, not an ad."
 4. Calls Groq with `temperature=1.0`
 
 What it returns — a single string:
+
 ```
 Found this vintage Smiths tour tee on depop for $22 and it's everything.
 Styled it with baggy jeans and chunky sneakers for that effortless 90s
@@ -631,6 +641,7 @@ return session
 ```
 
 Final session state:
+
 ```python
 {
     "query":              "I'm looking for a vintage graphic tee under $30...",
@@ -648,10 +659,10 @@ Final session state:
 
 **What the user actually sees in the Gradio UI:**
 
-| Panel | Content |
-|-------|---------|
+| Panel                    | Content                                                                                                                                                                                                                                                                                         |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 🛍️ **Top listing found** | `Vintage Band Tee — The Smiths 1987 Tour`<br>`Price: $22.00  •  Platform: depop`<br>`Size: M  •  Condition: good`<br>`Category: tops  •  Style: vintage, graphic tee, band, 90s, grunge`<br>`Colors: black, white`<br><br>`Authentic vintage tour tee. Faded graphic, no holes. Tagged medium.` |
-| 👗 **Outfit idea** | `Pair the Vintage Band Tee with your baggy straight-leg jeans for a relaxed 90s-grunge silhouette. Layer with the vintage black denim jacket if it's cool out, and finish with the chunky white sneakers to keep it streetwear. The black crossbody bag ties it all together.` |
-| ✨ **Your fit card** | `Found this vintage Smiths tour tee on depop for $22 and it's everything. Styled it with baggy jeans and chunky sneakers for that effortless 90s grunge energy. The faded graphic gives it so much character — OOTD sorted. 🖤` |
+| 👗 **Outfit idea**       | `Pair the Vintage Band Tee with your baggy straight-leg jeans for a relaxed 90s-grunge silhouette. Layer with the vintage black denim jacket if it's cool out, and finish with the chunky white sneakers to keep it streetwear. The black crossbody bag ties it all together.`                  |
+| ✨ **Your fit card**     | `Found this vintage Smiths tour tee on depop for $22 and it's everything. Styled it with baggy jeans and chunky sneakers for that effortless 90s grunge energy. The faded graphic gives it so much character — OOTD sorted. 🖤`                                                                 |
 
 The user walks away with: the item they asked about, a specific outfit built from their actual wardrobe, and a shareable caption — all from one natural-language query.
