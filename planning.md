@@ -132,18 +132,24 @@ For each tool, describe the specific failure mode you're handling and what the a
 
 ## A Complete Interaction (Step by Step)
 
-Write out what a full user interaction looks like from start to finish — tool call by tool call. Use a specific example query.
+FitFindr is a secondhand-shopping assistant that takes a user's natural-language query, searches a marketplace of thrifted clothing listings, and returns a complete styling recommendation. The agent parses the user's request to extract what they're looking for, then calls `search_listings` to find matching items — if nothing matches, it stops and tells the user so. When results are found, it picks the best match and feeds it into `suggest_outfit` to generate outfit ideas (using the user's existing wardrobe when available, or offering general styling advice when the wardrobe is empty), then wraps everything into a social-media-style fit card via `create_fit_card` so the user walks away with a concrete, shareable OOTD.
 
 **Example user query:** "I'm looking for a vintage graphic tee under $30. I mostly wear baggy jeans and chunky sneakers. What's out there and how would I style it?"
 
-**Step 1:**
-<!-- What does the agent do first? Which tool is called? With what input? -->
+**Step 1 — Parse the query:**
+The agent extracts structured parameters from the natural-language input: `description = "vintage graphic tee"`, `size = None` (no size mentioned), `max_price = 30.0`. It stores these in `session["parsed"]`.
 
-**Step 2:**
-<!-- What happens next? What was returned from step 1? What tool is called now? -->
+**Step 2 — Search listings:**
+The agent calls `search_listings(description="vintage graphic tee", size=None, max_price=30.0)`. The tool loads all 40 listings, filters to those priced ≤ $30, scores each by keyword overlap against the description ("vintage", "graphic", "tee"), drops zero-score items, and sorts by relevance descending. It returns, say, 3 matches — a vintage band tee ($22, depop), a retro graphic tee ($18, poshmark), and a washed logo tee ($25, thredUp). **Failure path:** if zero results match, the tool returns `[]`, and the agent sets `session["error"]` to a message like "No listings matched 'vintage graphic tee' under $30" and returns immediately — no further tools are called.
 
-**Step 3:**
-<!-- Continue until the full interaction is complete -->
+**Step 3 — Select top item:**
+The agent picks the highest-scored result (the vintage band tee, $22 from depop) and stores it as `session["selected_item"]`.
+
+**Step 4 — Suggest outfit:**
+The agent calls `suggest_outfit(new_item=selected_item, wardrobe=user_wardrobe)`. Since the wardrobe contains baggy jeans and chunky sneakers, the tool builds an LLM prompt listing those pieces alongside the vintage band tee and asks for specific outfit combinations. It returns a string like: "Pair the vintage band tee with your baggy jeans for a relaxed 90s-grunge silhouette, then ground the look with your chunky sneakers for a streetwear edge." **Failure path:** if the wardrobe were empty, the tool would instead ask the LLM for general styling advice (what pairs well with a vintage graphic tee, what vibe it suits) rather than erroring out.
+
+**Step 5 — Create fit card:**
+The agent calls `create_fit_card(outfit=outfit_suggestion, new_item=selected_item)`. The tool first checks that `outfit` is non-empty, then builds an LLM prompt with the item details (title, $22, depop) and the outfit text. It generates a 2-4 sentence Instagram/TikTok-style caption like: "Found this vintage band tee on depop for $22 and it's giving everything. Styled it with my go-to baggy jeans and chunky sneaks for that effortless 90s energy. OOTD sorted." **Failure path:** if `outfit` were empty or whitespace-only, `create_fit_card` returns an error message string instead of generating nonsense — no exception is raised.
 
 **Final output to user:**
-<!-- What does the user actually see at the end? -->
+The Gradio UI displays three things: the matching listing card (the vintage band tee with its details), the outfit suggestion paragraph, and the fit card caption — giving the user a complete, shareable styling recommendation.
