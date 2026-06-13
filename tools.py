@@ -132,6 +132,7 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
 
     Before writing code, fill in the Tool 2 section of planning.md.
     """
+    # print(new_item) # Checking to see if match with dict in handle_query.
     item_summary = (
         f"{new_item.get('title')} "
         f"(category: {new_item.get('category')}, "

@@ -109,6 +109,12 @@ Store the result: `session["parsed"] = {"description": description, "size": size
 
 You can do this with regex (grab `\$(\d+)` for price, `size\s+(\S+)` for size, remove those substrings and trim the rest for description) or by asking the LLM to return a JSON object with those three keys.
 
+**Chosen approach: regex** (implemented as `_parse_query()` in [agent.py](agent.py)). Regex was chosen over an LLM call because parsing is fully deterministic, needs no network/API key, adds zero latency, and the downstream `search_listings` only needs a bag of keyword tokens — it does not need a polished sentence. The parser:
+
+- **`max_price`** — first looks for a price cue (`under`, `below`, `max`, `less than`, `cheaper than`, `<`) followed by a number, then falls back to a bare `$NN` amount. The matched span is removed from the query.
+- **`size`** — looks for `size <token>` (e.g., `size M`, `size S/M`, `size XXS`); if absent, matches a word-based size (`small`→`S`, `medium`→`M`, `extra large`→`XL`, longest phrase first). The matched span is removed.
+- **`description`** — whatever text remains, lowercased and split into tokens, with a small filler set removed (`looking`, `for`, `a`, `the`, `i'm`, `want`, `mostly`, etc.) so only meaningful keywords reach `search_listings`. For `"looking for a vintage graphic tee under $30"` this yields `"vintage graphic tee"`.
+
 **3. Call `search_listings` and branch on the result.**
 
 ```python
@@ -190,7 +196,24 @@ You're done. The caller (Gradio UI) reads `session["error"]` first — if it's n
 
 **How does information from one tool get passed to the next?**
 
-<!-- Describe how your agent stores and accesses state within a session. What data is tracked? How is it passed between tool calls? -->
+All state for a single interaction lives in **one `session` dict**, created by `_new_session(query, wardrobe)` in [agent.py](agent.py) and threaded through every step of `run_agent()`. There are no globals and no hidden state — each step reads the fields it needs from `session` and writes its result back into `session`, so the dict is the single source of truth and the complete record of what happened.
+
+**Fields tracked (initialized up front so every key always exists):**
+
+| Field               | Set by                     | Type           | Purpose                                                                                 |
+| ------------------- | -------------------------- | -------------- | --------------------------------------------------------------------------------------- |
+| `query`             | `_new_session`             | `str`          | The original, unmodified user request.                                                  |
+| `parsed`            | Step 2 (`_parse_query`)    | `dict`         | `{"description", "size", "max_price"}` — the inputs to `search_listings`.               |
+| `search_results`    | Step 3 (`search_listings`) | `list[dict]`   | All matching listings, best match first.                                                |
+| `selected_item`     | Step 4                     | `dict \| None` | `search_results[0]` — the listing fed into both `suggest_outfit` and `create_fit_card`. |
+| `wardrobe`          | `_new_session`             | `dict`         | The user's wardrobe (`{"items": [...]}`), passed straight into `suggest_outfit`.        |
+| `outfit_suggestion` | Step 5 (`suggest_outfit`)  | `str \| None`  | Outfit advice; becomes the `outfit` argument to `create_fit_card`.                      |
+| `fit_card`          | Step 6 (`create_fit_card`) | `str \| None`  | The shareable caption.                                                                  |
+| `error`             | Step 3 (on empty results)  | `str \| None`  | Set only on early exit; `None` on the success path.                                     |
+
+**How data flows between tools:** the output of one tool is stored in `session` and then read as the input to the next — `parsed` → `search_listings` → `search_results` → `selected_item` → `suggest_outfit` → `outfit_suggestion` → `create_fit_card` → `fit_card`. The `selected_item` dict is reused as the `new_item` argument for both LLM tools, and `wardrobe` is read directly from the session rather than passed around separately.
+
+**How the caller reads it:** `run_agent` returns the same `session` dict. The caller checks `session["error"]` first — if it is not `None`, the interaction ended early (at Step 3) and `outfit_suggestion`/`fit_card` remain `None`. Otherwise all three output fields are populated and ready to display.
 
 ---
 
