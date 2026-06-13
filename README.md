@@ -296,13 +296,29 @@ User query + wardrobe
        │                  │
    results found      results empty
        │                  │
-       ▼                  ▼
-┌──────────────┐   ┌──────────────────────┐
-│ Step 4: Pick │   │ EARLY EXIT            │
-│ top result   │   │ session["error"] set  │
-│ results[0]   │   │ return session        │
-└──────┬───────┘   └──────────────────────┘
-       ▼
+       │                  ▼
+       │         ┌──────────────────────────┐
+       │         │ Retry 1: drop size        │
+       │         │ Retry 2: drop price       │
+       │         │ Retry 3: broaden keywords │
+       │         └──────┬──────────────┬────┘
+       │                │              │
+       │          retry found    all failed
+       │                │              │
+       │                ▼              ▼
+       │         ┌──────────────┐  ┌──────────────────────┐
+       │         │ (continues   │  │ EARLY EXIT            │
+       │         │  with note)  │  │ session["error"] set  │
+       │         └──────┬───────┘  │ return session        │
+       │                │          └──────────────────────┘
+       │                │
+       ▼                ▼
+┌─────────────────────────────────┐
+│ Step 4: Pick top result         │
+│ session["selected_item"] = [0]  │
+│ (store adjustment note if any)  │
+└──────────────┬──────────────────┘
+               ▼
 ┌─────────────────────────────────┐
 │ Step 5: Compare price           │
 │ price_comparison(item)          │
@@ -329,14 +345,24 @@ User query + wardrobe
 └─────────────────────────────────┘
 ```
 
-**The only branch the agent loop itself makes** is at Step 3: if `search_listings` returns an empty list, the agent sets `session["error"]` and returns immediately — `price_comparison`, `suggest_outfit`, and `create_fit_card` are never called with empty input. Every other decision (empty wardrobe, empty outfit string, no comparables for price) is handled inside the tool that encounters it, so the pipeline always reaches the return statement.
+**The only branch the agent loop itself makes** is at Step 3 — but rather than giving up immediately on an empty result, the agent **retries with progressively loosened constraints** before surfacing an error:
+
+| Retry | What changes | Rationale |
+|---|---|---|
+| 1 | Drop the size filter | The user's size might not be available in matching items |
+| 2 | Drop the price ceiling | Matches might exist just above the stated budget |
+| 3 | Broaden to first keyword only | The description might be too specific (e.g., "designer ballgown" → just "designer") |
+
+If any retry finds results, the agent stores an **`adjustment` note** explaining exactly what was changed (e.g., *"removed the size filter (was 'XXS') and dropped the $3 price limit"*) and continues through the rest of the pipeline normally. If all retries are exhausted, the agent sets `session["error"]` and returns — `price_comparison`, `suggest_outfit`, and `create_fit_card` are never called with empty input.
+
+Every other decision (empty wardrobe, empty outfit string, no comparables) is handled inside the tool that encounters it.
 That having been said, inside the tools, there is often error handling, such as if there are no listings -- a generic but helpful message is usually returned.
 
 ### Decision Ownership Table
 
 | #   | Decision                      | Who checks it                | If true                     | If false                              |
 | --- | ----------------------------- | ---------------------------- | --------------------------- | ------------------------------------- |
-| 3   | `search_results` is empty?    | **Agent loop**               | Set `error`, return early   | Continue to step 4                    |
+| 3   | `search_results` is empty?    | **Agent loop**               | Retry with looser filters (drop size → drop price → broaden keywords). If still empty after all retries, set `error` and return early. | Continue to step 4 (with adjustment note if retried) |
 | 5   | `wardrobe["items"]` is empty? | **Inside `suggest_outfit`**  | General styling advice      | Specific outfits with wardrobe pieces |
 | 6   | `outfit` string is empty?     | **Inside `create_fit_card`** | Return error message string | Call LLM for caption                  |
 
@@ -356,6 +382,7 @@ All state for a single user interaction lives in **one `session` dict**, created
 | `selected_item`     | Step 4                          | `dict \| None` | `search_results[0]` — fed into price_comparison and both LLM tools   |
 | `price_assessment`  | Step 5 (`price_comparison`)     | `str \| None`  | Price comparison vs. similar listings; shown in the listing panel    |
 | `trend_info`        | Step 5a (`trend_analysis`)      | `str \| None`  | Trend assessment; injected into `suggest_outfit` and shown in listing panel |
+| `adjustment`        | Step 3 (on retry success)       | `str \| None`  | Describes which filters were loosened to find results; shown in listing panel |
 | `wardrobe`          | `_new_session`                  | `dict`         | The user's wardrobe (`{"items": [...]}`)                             |
 | `outfit_suggestion` | Step 6 (`suggest_outfit`)       | `str \| None`  | Outfit advice; becomes the `outfit` argument to `create_fit_card`    |
 | `fit_card`          | Step 7 (`create_fit_card`)      | `str \| None`  | The shareable caption                                                |
@@ -453,14 +480,31 @@ Every failure mode is handled — nothing propagates as an uncaught exception to
 | --------------------------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | No listings match the query | Returns `[]` (empty list). Does not raise. | Checks `if not session["search_results"]:` after the call. Sets `session["error"]` to a message like `"Sorry — no listings matched 'vintage graphic tee' under $30. Try a broader description or a higher budget."` and returns the session immediately. `suggest_outfit` and `create_fit_card` are never called. | The Gradio UI shows the error message in the first panel. The other two panels are blank. The error includes a concrete next step. |
 
-**Concrete example:**
+**Concrete example (no retry succeeds):**
 
 ```
 Query: "designer ballgown size XXS under $5"
 Parsed: {"description": "designer ballgown", "size": "XXS", "max_price": 5.0}
-Result: 0 listings match (no ballgowns in the dataset at ≤$5)
+Retry 1: drop size → 0 results (no ballgowns ≤$5)
+Retry 2: drop price → 0 results (no ballgowns at all)
+Retry 3: broaden to "designer" → 0 results (no "designer" items)
 Error:  "Sorry — no listings matched 'designer ballgown' under $5.
         Try a broader description or a higher budget."
+```
+
+**Concrete example (retry succeeds):**
+
+```
+Query: "designer bag size XXS under $3"
+Parsed: {"description": "designer bag", "size": "XXS", "max_price": 3.0}
+Retry 1: drop size → 0 results (nothing matching "designer bag" ≤$3)
+Retry 2: drop price → 1 result: "Baggy Carpenter Jeans — Dark Wash"
+         (matched "bag" keyword)
+Adjustment: "removed the size filter (was 'XXS') and dropped the
+            $3 price limit"
+User sees: "(Automatically removed the size filter (was 'XXS') and
+           dropped the $3 price limit to find this.)"
+           [listing card follows]
 ```
 
 ### Tool: `suggest_outfit`

@@ -196,6 +196,7 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "selected_item": None,       # top result, passed into suggest_outfit
         "price_assessment": None,    # price comparison vs. similar listings
         "trend_info": None,          # trend analysis for the selected item
+        "adjustment": None,          # set when search was retried with looser filters
         "wardrobe": wardrobe,        # user's wardrobe dict
         "outfit_suggestion": None,   # string returned by suggest_outfit
         "fit_card": None,            # string returned by create_fit_card
@@ -260,13 +261,50 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     # Step 2 — parse the raw query into structured search parameters (LLM with regex fallback).
     session["parsed"] = _parse_query(query)
 
-    # Step 3 — search the listings, then branch on the result.
+    # Step 3 — search the listings with progressive retry when nothing matches.
+    desc = session["parsed"]["description"]
+    size = session["parsed"]["size"]
+    price = session["parsed"]["max_price"]
+    adjustment = None  # set on retry so we can tell the user what changed
+
     session["search_results"] = search_listings(
-        description=session["parsed"]["description"],
-        size=session["parsed"]["size"],
-        max_price=session["parsed"]["max_price"],
+        description=desc, size=size, max_price=price,
     )
+
     if not session["search_results"]:
+        # ── Retry 1: drop the size filter ───────────────────────────────
+        if size is not None:
+            adjustment = f"removed the size filter (was '{size}')"
+            session["search_results"] = search_listings(
+                description=desc, size=None, max_price=price,
+            )
+
+    if not session["search_results"]:
+        # ── Retry 2: also drop the price ceiling ────────────────────────
+        if price is not None:
+            prev = f"dropped the ${price:.0f} price limit"
+            adjustment = (
+                f"{adjustment} and {prev}" if adjustment else prev
+            )
+            session["search_results"] = search_listings(
+                description=desc, size=None, max_price=None,
+            )
+
+    if not session["search_results"]:
+        # ── Retry 3: broaden to just the first keyword ──────────────────
+        keywords = desc.split()
+        if len(keywords) > 1:
+            broader = keywords[0]
+            prev = f"broadened keywords to '{broader}'"
+            adjustment = (
+                f"{adjustment}, then {prev}" if adjustment else prev
+            )
+            session["search_results"] = search_listings(
+                description=broader, size=None, max_price=None,
+            )
+
+    if not session["search_results"]:
+        # ── All retries exhausted ───────────────────────────────────────
         session["error"] = (
             f"Sorry — no listings matched '{session['parsed']['description']}'"
             + (
@@ -277,6 +315,9 @@ def run_agent(query: str, wardrobe: dict) -> dict:
             + ". Try a broader description or a higher budget."
         )
         return session  # early exit — outfit and fit card are never called
+
+    # Store the adjustment so the UI can surface what was changed.
+    session["adjustment"] = adjustment
 
     # Step 4 — pick the top (highest-relevance) result.
     session["selected_item"] = session["search_results"][0]
@@ -336,6 +377,8 @@ if __name__ == "__main__":
     if session1["error"]:
         print(f"Error: {session1['error']}")
     else:
+        if session1.get("adjustment"):
+            print(f"(Auto-adjusted: {session1['adjustment']})")
         print(f"Found: {session1['selected_item']['title']}")
         print(f"Trends: {session1['trend_info']}")
         print(f"Profile after: {get_profile().summary()}\n")
@@ -350,6 +393,8 @@ if __name__ == "__main__":
     if session2["error"]:
         print(f"Error: {session2['error']}")
     else:
+        if session2.get("adjustment"):
+            print(f"(Auto-adjusted: {session2['adjustment']})")
         print(f"Found: {session2['selected_item']['title']}")
         print(f"Profile after: {get_profile().summary()}\n")
         print(f"Outfit: {session2['outfit_suggestion']}")

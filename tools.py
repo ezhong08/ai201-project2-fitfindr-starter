@@ -213,18 +213,40 @@ def suggest_outfit(
             "their names. Reply in 2-5 sentences."
         )
 
-    try:
-        client = _get_groq_client()
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return response.choices[0].message.content.strip()
-    except Exception:
-        return (
-            "Try pairing this with your favorite jeans and sneakers for an "
-            "easy everyday look."
-        )
+    # ── LLM call with retry on a faster model ───────────────────────────
+    # Primary model first; if it fails (rate limit, timeout, etc.), wait
+    # briefly and retry with a lighter model that has higher rate limits.
+    import time
+
+    for attempt, model in enumerate(
+        ("llama-3.3-70b-versatile", "llama-3.1-8b-instant"), start=1
+    ):
+        try:
+            client = _get_groq_client()
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return response.choices[0].message.content.strip()
+        except Exception:
+            if attempt == 1:
+                time.sleep(1.5)  # back off to clear rate-limit window
+                continue
+
+    # Both models failed — last-resort fallback that varies per item.
+    title = new_item.get("title", "this piece")
+    tags = new_item.get("style_tags", [])
+    vibe = tags[0] if tags else ""
+    colors = new_item.get("colors", [])
+    color_hint = f" The {colors[0]} tones" if colors else ""
+    return (
+        f"The {title} works well with relaxed denim, neutral layers, "
+        f"and clean footwear."
+        + (f" Its {vibe} aesthetic" if vibe else " It")
+        + " makes it easy to dress up or down."
+        + color_hint
+        + "."
+    )
 
 
 # ── Tool 3: create_fit_card ───────────────────────────────────────────────────
@@ -279,19 +301,28 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
         "Return only the caption text."
     )
 
-    try:
-        client = _get_groq_client()
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=1.0,
-        )
-        return response.choices[0].message.content.strip()
-    except Exception:
-        return (
-            f"Found this {title} on {platform} for ${price} and had to grab it. "
-            f"{outfit}"
-        )
+    import time
+
+    for attempt, model in enumerate(
+        ("llama-3.3-70b-versatile", "llama-3.1-8b-instant"), start=1
+    ):
+        try:
+            client = _get_groq_client()
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=1.0,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception:
+            if attempt == 1:
+                time.sleep(1.5)
+                continue
+
+    return (
+        f"Found this {title} on {platform} for ${price} and had to grab it. "
+        f"{outfit}"
+    )
 
 
 # ── Tool 4: price_comparison ──────────────────────────────────────────────────

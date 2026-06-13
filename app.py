@@ -62,7 +62,12 @@ def handle_query(
 
     # 5. Success path: format the selected listing into a readable card.
     item = session["selected_item"]
-    listing_text = (
+    listing_text = ""
+    if session.get("adjustment"):
+        listing_text += (
+            f"(Automatically {session['adjustment']} to find this.)\n\n"
+        )
+    listing_text += (
         f"{item['title']}\n"
         f"Price: ${item['price']:.2f}  •  Platform: {item['platform']}\n"
         f"Size: {item['size']}  •  Condition: {item['condition']}\n"
