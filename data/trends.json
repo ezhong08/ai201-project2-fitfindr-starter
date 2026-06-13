@@ -1,0 +1,56 @@
+{
+  "season": "Spring 2026",
+  "source_note": "Mock trend data simulating what a real aggregator (e.g. Google Trends, TikTok fashion hashtags, Vogue runway reports) would surface. Updated seasonally.",
+
+  "trending_styles": [
+    "y2k",
+    "vintage",
+    "gorpcore",
+    "quiet luxury",
+    "balletcore",
+    "90s",
+    "grunge",
+    "streetwear",
+    "cottagecore"
+  ],
+
+  "trending_colors": [
+    "butter yellow",
+    "cherry red",
+    "sage green",
+    "chocolate brown",
+    "baby blue",
+    "silver",
+    "burgundy",
+    "black"
+  ],
+
+  "trending_categories": [
+    "tops",
+    "outerwear",
+    "accessories"
+  ],
+
+  "trending_materials": [
+    "denim",
+    "leather",
+    "sheer",
+    "crochet",
+    "suede"
+  ],
+
+  "hot_items": [
+    "graphic tee",
+    "leather bomber",
+    "cargo pants",
+    "ballet flats",
+    "micro bag",
+    "baby tee",
+    "track jacket",
+    "combat boots",
+    "band tee",
+    "oversized blazer"
+  ],
+
+  "runway_notes": "Y2K and vintage revival continues strong. Leather and denim dominate streetwear. Balletcore is crossing from TikTok into mainstream. Butter yellow is the color of the season — replacing last season's Barbie pink. Quiet luxury neutrals (cashmere beiges, tailored wool) remain a staple for workwear."
+}

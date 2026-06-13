@@ -25,7 +25,14 @@ import re
 from dotenv import load_dotenv
 from groq import Groq
 
-from tools import search_listings, suggest_outfit, create_fit_card, price_comparison
+from style_profile import get_profile
+from tools import (
+    create_fit_card,
+    price_comparison,
+    search_listings,
+    suggest_outfit,
+    trend_analysis,
+)
 
 load_dotenv()
 
@@ -188,6 +195,7 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "search_results": [],        # list of matching listing dicts
         "selected_item": None,       # top result, passed into suggest_outfit
         "price_assessment": None,    # price comparison vs. similar listings
+        "trend_info": None,          # trend analysis for the selected item
         "wardrobe": wardrobe,        # user's wardrobe dict
         "outfit_suggestion": None,   # string returned by suggest_outfit
         "fit_card": None,            # string returned by create_fit_card
@@ -273,15 +281,32 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     # Step 4 — pick the top (highest-relevance) result.
     session["selected_item"] = session["search_results"][0]
 
+    # Step 4a — record this interaction in the style profile so the next
+    # query can use the learned preferences without the user re-entering them.
+    profile = get_profile()
+    profile.record_interaction(
+        query=query,
+        parsed=session["parsed"],
+        selected_item=session["selected_item"],
+    )
+
     # Step 5 — compare the item's price against similar listings.
     session["price_assessment"] = price_comparison(
         item=session["selected_item"],
     )
 
-    # Step 6 — suggest an outfit (the tool handles the empty-wardrobe case).
+    # Step 5a — assess how on-trend the item is.
+    session["trend_info"] = trend_analysis(
+        item=session["selected_item"],
+    )
+
+    # Step 6 — suggest an outfit, referencing past style preferences
+    # and current trend signals.
     session["outfit_suggestion"] = suggest_outfit(
         new_item=session["selected_item"],
         wardrobe=session["wardrobe"],
+        style_profile=profile,
+        trend_info=session["trend_info"],
     )
 
     # Step 7 — build the shareable fit card (the tool guards an empty outfit).
@@ -297,24 +322,43 @@ def run_agent(query: str, wardrobe: dict) -> dict:
 # ── CLI test ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    from style_profile import get_profile
     from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
 
-    print("=== Happy path: graphic tee ===\n")
-    session = run_agent(
-        query="looking for a vintage graphic tee under $30",
-        wardrobe=get_example_wardrobe(),
-    )
-    if session["error"]:
-        print(f"Error: {session['error']}")
-    else:
-        print(f"Found: {session['selected_item']['title']}")
-        print(f"Price assessment: {session['price_assessment']}")
-        print(f"\nOutfit: {session['outfit_suggestion']}")
-        print(f"\nFit card: {session['fit_card']}")
+    wardrobe = get_example_wardrobe()
 
-    print("\n\n=== No-results path ===\n")
-    session2 = run_agent(
-        query="designer ballgown size XXS under $5",
-        wardrobe=get_example_wardrobe(),
+    # ── Interaction 1: establish style preferences ──────────────────────
+    print("=== Interaction 1: vintage graphic tee ===\n")
+    session1 = run_agent(
+        query="looking for a vintage graphic tee under $30",
+        wardrobe=wardrobe,
     )
-    print(f"Error message: {session2['error']}")
+    if session1["error"]:
+        print(f"Error: {session1['error']}")
+    else:
+        print(f"Found: {session1['selected_item']['title']}")
+        print(f"Trends: {session1['trend_info']}")
+        print(f"Profile after: {get_profile().summary()}\n")
+        print(f"Outfit: {session1['outfit_suggestion']}")
+
+    # ── Interaction 2: different search — preferences carry over ────────
+    print("\n\n=== Interaction 2: leather jacket (preferences remembered) ===\n")
+    session2 = run_agent(
+        query="black leather jacket size M under 100",
+        wardrobe=wardrobe,
+    )
+    if session2["error"]:
+        print(f"Error: {session2['error']}")
+    else:
+        print(f"Found: {session2['selected_item']['title']}")
+        print(f"Profile after: {get_profile().summary()}\n")
+        print(f"Outfit: {session2['outfit_suggestion']}")
+        print(f"\nFit card: {session2['fit_card']}")
+
+    # ── No-results path ────────────────────────────────────────────────
+    print("\n\n=== No-results path ===\n")
+    session3 = run_agent(
+        query="designer ballgown size XXS under $5",
+        wardrobe=wardrobe,
+    )
+    print(f"Error message: {session3['error']}")

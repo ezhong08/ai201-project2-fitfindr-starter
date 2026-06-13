@@ -15,37 +15,37 @@ but check your terminal — the port may differ).
 import gradio as gr
 
 from agent import run_agent
+from style_profile import StyleProfile, get_profile, reset_profile
 from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
 
 
 # ── query handler ─────────────────────────────────────────────────────────────
 
-def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
+def handle_query(
+    user_query: str,
+    wardrobe_choice: str,
+    profile_state: StyleProfile,
+) -> tuple[str, str, str, StyleProfile]:
     """
     Called by Gradio when the user submits a query.
 
     Args:
-        user_query:     The text the user typed into the search box.
+        user_query:      The text the user typed into the search box.
         wardrobe_choice: Either "Example wardrobe" or "Empty wardrobe (new user)".
+        profile_state:   A gr.State holding the StyleProfile that persists
+                         across interactions.
 
     Returns:
-        A tuple of three strings:
-            (listing_text, outfit_suggestion, fit_card)
-        Each string maps to one of the three output panels in the UI.
-
-    TODO:
-        1. Guard against an empty query (return early with an error message).
-        2. Select the wardrobe based on wardrobe_choice.
-        3. Call run_agent() with the query and selected wardrobe.
-        4. If session["error"] is set, return the error in the first panel
-           and empty strings for the other two.
-        5. Otherwise, format session["selected_item"] into a readable listing_text
-           string and return it along with session["outfit_suggestion"] and
-           session["fit_card"].
+        A tuple of (listing_text, outfit_suggestion, fit_card, profile_state).
+        The profile_state is returned so Gradio updates its internal state.
     """
+    # Re-seed the global singleton from Gradio state so agent.py sees it.
+    import style_profile
+    style_profile._profile = profile_state
+
     # 1. Guard against an empty (or whitespace-only) query.
     if not user_query.strip():
-        return "Please enter a search query.", "", ""
+        return "Please enter a search query.", "", "", profile_state
 
     # 2. Select the wardrobe based on the radio choice.
     if wardrobe_choice == "Example wardrobe":
@@ -53,16 +53,15 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
     else:
         wardrobe = get_empty_wardrobe()
 
-    # 3. Run the planning loop.
+    # 3. Run the planning loop (records into the global profile on success).
     session = run_agent(user_query, wardrobe)
 
-    # 4. Early-exit path: search found nothing. Show the error in panel one only.
+    # 4. Early-exit path: search found nothing.
     if session["error"] is not None:
-        return session["error"], "", ""
+        return session["error"], "", "", profile_state
 
     # 5. Success path: format the selected listing into a readable card.
     item = session["selected_item"]
-    # print(item) # Checking to see match with dict in suggest_outfit.
     listing_text = (
         f"{item['title']}\n"
         f"Price: ${item['price']:.2f}  •  Platform: {item['platform']}\n"
@@ -70,10 +69,11 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
         f"Category: {item['category']}  •  Style: {', '.join(item['style_tags'])}\n"
         f"Colors: {', '.join(item['colors'])}\n\n"
         f"{item['description']}\n\n"
-        f"💲 {session['price_assessment']}"
+        f"{session['trend_info']}\n"
+        f"$ {session['price_assessment']}"
     )
 
-    return listing_text, session["outfit_suggestion"], session["fit_card"]
+    return listing_text, session["outfit_suggestion"], session["fit_card"], profile_state
 
 
 # ── interface ─────────────────────────────────────────────────────────────────
@@ -88,10 +88,14 @@ EXAMPLE_QUERIES = [
 
 def build_interface():
     with gr.Blocks(title="FitFindr") as demo:
+        # Hidden state that persists the style profile across interactions.
+        profile_state = gr.State(get_profile())
+
         gr.Markdown("""
 # FitFindr 🛍️
 Find secondhand pieces and get outfit ideas based on your wardrobe.
 Describe what you're looking for — include size and price if you want to filter.
+**Your style preferences are remembered across searches.**
         """)
 
         with gr.Row():
@@ -135,13 +139,13 @@ Describe what you're looking for — include size and price if you want to filte
 
         submit_btn.click(
             fn=handle_query,
-            inputs=[query_input, wardrobe_choice],
-            outputs=[listing_output, outfit_output, fitcard_output],
+            inputs=[query_input, wardrobe_choice, profile_state],
+            outputs=[listing_output, outfit_output, fitcard_output, profile_state],
         )
         query_input.submit(
             fn=handle_query,
-            inputs=[query_input, wardrobe_choice],
-            outputs=[listing_output, outfit_output, fitcard_output],
+            inputs=[query_input, wardrobe_choice, profile_state],
+            outputs=[listing_output, outfit_output, fitcard_output, profile_state],
         )
 
     return demo

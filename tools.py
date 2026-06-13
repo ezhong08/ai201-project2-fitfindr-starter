@@ -107,14 +107,26 @@ def search_listings(
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
 
-def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
+def suggest_outfit(
+    new_item: dict,
+    wardrobe: dict,
+    style_profile=None,  # StyleProfile | None
+    trend_info: str = "",  # trend analysis string to inject
+) -> str:
     """
     Given a thrifted item and the user's wardrobe, suggest 1–2 complete outfits.
 
     Args:
-        new_item: A listing dict (the item the user is considering buying).
-        wardrobe: A wardrobe dict with an 'items' key containing a list of
-                  wardrobe item dicts. May be empty — handle this gracefully.
+        new_item:      A listing dict (the item the user is considering buying).
+        wardrobe:      A wardrobe dict with an 'items' key containing a list of
+                       wardrobe item dicts. May be empty — handle this gracefully.
+        style_profile: Optional StyleProfile with preferences learned from past
+                       interactions. When non-empty, its summary is appended to
+                       the LLM prompt so the suggestion can reference the user's
+                       established style tastes.
+        trend_info:    Optional trend-analysis string (from trend_analysis()).
+                       When non-empty, appended to the prompt so the suggestion
+                       can highlight how the outfit aligns with current trends.
 
     Returns:
         A non-empty string with outfit suggestions.
@@ -143,11 +155,33 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
 
     items = wardrobe.get("items", [])
 
+    # Build extra context snippets injected into the LLM prompt.
+    profile_snippet = ""
+    if style_profile is not None and not style_profile.is_empty():
+        profile_snippet = (
+            f"\n\nThe user's style profile (learned from previous searches): "
+            f"{style_profile.summary()}. "
+            f"Reference these preferences naturally when suggesting outfits — "
+            f"note shared aesthetics or complementary styles, but don't force "
+            f"a mismatch."
+        )
+
+    trend_snippet = ""
+    if trend_info:
+        trend_snippet = (
+            f"\n\nCurrent trend context: {trend_info} "
+            f"Work this trend awareness into the outfit suggestion naturally — "
+            f"mention why the item feels timely or how to lean into the trend "
+            f"with the suggested pairings."
+        )
+
     if not items:
         prompt = (
             "You are a personal stylist for a secondhand-fashion app. "
             "The user doesn't have any wardrobe items saved yet.\n\n"
-            f"They're considering this thrifted item: {item_summary}.\n\n"
+            f"They're considering this thrifted item: {item_summary}."
+            f"{profile_snippet}"
+            f"{trend_snippet}\n\n"
             "Suggest general pairings and vibes for this piece — what kinds of "
             "bottoms, shoes, and layers would work with it, what aesthetic it "
             "suits, and what occasions it's great for. Do NOT invent specific "
@@ -171,7 +205,9 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
         prompt = (
             "You are a personal stylist for a secondhand-fashion app.\n\n"
             f"The user is considering this thrifted item: {item_summary}.\n\n"
-            f"Their wardrobe contains:\n{wardrobe_text}\n\n"
+            f"Their wardrobe contains:\n{wardrobe_text}"
+            f"{profile_snippet}"
+            f"{trend_snippet}\n\n"
             "Suggest 1-2 specific outfit combinations that pair the new item "
             "with named pieces from the wardrobe above. Reference pieces by "
             "their names. Reply in 2-5 sentences."
@@ -374,4 +410,160 @@ def price_comparison(item: dict, listings: list[dict] | None = None) -> str:
         f"Compared against {count} similar {category} listings "
         f"(average ${avg_price:.2f}, range ${min_price:.2f}–${max_price:.2f})."
         f"{condition_note}"
+    )
+
+
+# ── Tool 5: trend_analysis ────────────────────────────────────────────────────
+
+# Cache the trends file in memory so we only read it once.
+_TRENDS_CACHE: dict | None = None
+
+
+def _load_trends() -> dict:
+    """Load the mock trends dataset (cached)."""
+    global _TRENDS_CACHE
+    if _TRENDS_CACHE is None:
+        import json
+        import os
+
+        path = os.path.join(
+            os.path.dirname(__file__), "data", "trends.json"
+        )
+        with open(path, "r", encoding="utf-8") as f:
+            _TRENDS_CACHE = json.load(f)
+    return _TRENDS_CACHE
+
+
+def trend_analysis(item: dict) -> str:
+    """
+    Score a listing against current fashion trends and return an assessment
+    that surfaces which trending signals the item hits.
+
+    Args:
+        item: The listing dict to assess.  Reads ``style_tags``, ``colors``,
+              ``category``, and ``title``.
+
+    Returns:
+        A 2–4 sentence string describing how on-trend the item is, with
+        specific signal names.  Example:
+
+        *"🔥  On trend (3 signals): vintage style is trending this season,
+        'graphic tee' is a hot item right now, and tops are the most
+        sought-after category.  The black colorway keeps it versatile."*
+
+    How it works (data source: ``data/trends.json`` — a mock trend report
+    simulating aggregator data from runway shows, TikTok hashtags, and
+    retail search volume):
+
+        1. Load the trend report (cached).
+        2. Score the item across five dimensions:
+           - **style tag overlap** — how many of the item's style_tags appear
+             in trending_styles.
+           - **color overlap** — how many of the item's colors appear in
+             trending_colors.
+           - **category signal** — whether the item's category is in
+             trending_categories.
+           - **hot-item match** — whether any word from hot_items appears in
+             the item's title or style_tags.
+           - **material mentions** — whether the item's description mentions
+             any trending_materials (simple substring check).
+        3. Build a sentence per matched dimension with specific names.
+        4. If zero signals are hit, return a neutral note (the item isn't
+           especially timely but isn't off-trend either).
+    """
+    trends = _load_trends()
+
+    item_tags = [t.lower() for t in item.get("style_tags", [])]
+    item_colors = [c.lower() for c in item.get("colors", [])]
+    item_category = item.get("category", "").lower()
+    item_title = item.get("title", "").lower()
+    item_desc = item.get("description", "").lower()
+
+    trending_styles = [s.lower() for s in trends.get("trending_styles", [])]
+    trending_colors = [c.lower() for c in trends.get("trending_colors", [])]
+    trending_categories = [
+        c.lower() for c in trends.get("trending_categories", [])
+    ]
+    hot_items = [h.lower() for h in trends.get("hot_items", [])]
+    trending_materials = [
+        m.lower() for m in trends.get("trending_materials", [])
+    ]
+
+    signals: list[str] = []
+    hit_styles: list[str] = []
+    hit_colors: list[str] = []
+    hit_items: list[str] = []
+    hit_materials: list[str] = []
+
+    # ── 1. Style tag overlap ────────────────────────────────────────────
+    for tag in item_tags:
+        if tag in trending_styles and tag not in hit_styles:
+            hit_styles.append(tag)
+    if hit_styles:
+        signals.append(
+            f"{', '.join(hit_styles)} style{'s' if len(hit_styles) > 1 else ''} "
+            f"{'are' if len(hit_styles) > 1 else 'is'} trending this season"
+        )
+
+    # ── 2. Color overlap ───────────────────────────────────────────────
+    for color in item_colors:
+        if color in trending_colors and color not in hit_colors:
+            hit_colors.append(color)
+    if hit_colors:
+        signals.append(
+            f"{', '.join(hit_colors)} {'are' if len(hit_colors) > 1 else 'is'} "
+            f"a key color this season"
+        )
+
+    # ── 3. Category signal ─────────────────────────────────────────────
+    if item_category in trending_categories:
+        signals.append(
+            f"{item_category} {'are' if item_category == 'accessories' else 'is'} "
+            f"a trending category right now"
+        )
+
+    # ── 4. Hot-item match ──────────────────────────────────────────────
+    haystack = f"{item_title} {' '.join(item_tags)} {item_desc}"
+    for hot in hot_items:
+        if hot in haystack and hot not in hit_items:
+            hit_items.append(hot)
+    if hit_items:
+        signals.append(
+            f"{', '.join(hit_items)} {'are' if len(hit_items) > 1 else 'is'} "
+            f"a hot item this season"
+        )
+
+    # ── 5. Material mentions ───────────────────────────────────────────
+    for mat in trending_materials:
+        if mat in item_desc and mat not in hit_materials:
+            hit_materials.append(mat)
+    if hit_materials:
+        signals.append(
+            f"{', '.join(hit_materials)} is a trending material"
+        )
+
+    # ── Build response ─────────────────────────────────────────────────
+    signal_count = len(signals)
+
+    if signal_count == 0:
+        return (
+            f"Trend check: This {item.get('title', 'item')} doesn't hit any "
+            f"specific trending signals this season — it's a timeless piece "
+            f"that works regardless of what's hot right now."
+        )
+
+    # Tier the response
+    if signal_count >= 4:
+        heat = ">> Very on trend"
+    elif signal_count >= 2:
+        heat = "> On trend"
+    else:
+        heat = "- Mildly on trend"
+
+    detail = ".  ".join(signals) + "."
+    season = trends.get("season", "this season")
+
+    return (
+        f"{heat} ({signal_count} signal{'s' if signal_count > 1 else ''} "
+        f"for {season}): {detail}"
     )

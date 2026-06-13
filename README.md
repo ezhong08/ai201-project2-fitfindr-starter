@@ -12,9 +12,12 @@ A secondhand-fashion shopping assistant that takes natural-language queries, sea
   - [Tool 1: `search_listings`](#tool-1-search_listings)
   - [Tool 2: `suggest_outfit`](#tool-2-suggest_outfit)
   - [Tool 3: `create_fit_card`](#tool-3-create_fit_card)
+  - [Tool 4: `price_comparison`](#tool-4-price_comparison)
+  - [Tool 5: `trend_analysis`](#tool-5-trend_analysis)
 - [Planning Loop](#planning-loop)
 - [State Management](#state-management)
 - [Query Parsing](#query-parsing)
+- [Style Profile Memory](#style-profile-memory)
 - [Error Handling](#error-handling)
 - [Spec Reflection](#spec-reflection)
 
@@ -56,11 +59,13 @@ Runs two end-to-end tests: a happy-path query and a deliberate no-results query.
 ai201-project2-fitfindr-starter/
 ├── data/
 │   ├── listings.json            # 40 mock secondhand listings
-│   └── wardrobe_schema.json     # Wardrobe format + example wardrobe (10 items)
+│   ├── wardrobe_schema.json     # Wardrobe format + example wardrobe (10 items)
+│   └── trends.json              # Mock seasonal trend report
 ├── utils/
 │   └── data_loader.py           # Loaders for listings and wardrobes
 ├── tools.py                     # Four standalone tool functions
 ├── agent.py                     # Query parser + planning loop (run_agent)
+├── style_profile.py             # Cross-interaction style preference memory
 ├── app.py                       # Gradio web interface
 ├── planning.md                  # Planning document (design decisions)
 ├── requirements.txt             # Python dependencies
@@ -214,6 +219,57 @@ Example: _"Found this vintage Smiths tour tee on depop for $22 and it's everythi
 
 ---
 
+### Tool 5: `trend_analysis`
+
+|             |                                                                                                             |
+| ----------- | ----------------------------------------------------------------------------------------------------------- |
+| **Purpose** | Score a listing against current fashion trends and return an assessment of how on-trend it is.             |
+| **File**    | [tools.py](tools.py#L404-L530)                                                                              |
+| **Data**    | [data/trends.json](data/trends.json) — a mock seasonal trend report                                       |
+
+**Inputs:**
+
+| Parameter | Type   | Description                                                                                   |
+| --------- | ------ | --------------------------------------------------------------------------------------------- |
+| `item`    | `dict` | The listing dict to assess. Reads `style_tags`, `colors`, `category`, `title`, `description`. |
+
+**Output:** `str` — a 2–4 sentence assessment with a heat-level prefix and specific signal names. Examples:
+
+> *"> On trend (3 signals for Spring 2026): y2k, vintage, cottagecore styles are trending this season. tops is a trending category right now. graphic tee, baby tee are a hot item this season."*
+
+> *"- Mildly on trend (1 signal for Spring 2026): vintage, streetwear styles are trending this season."*
+
+> *"Trend check: This slim-fit Oxford shirt doesn't hit any specific trending signals this season — it's a timeless piece that works regardless of what's hot right now."*
+
+**How trend signals are scored** (data source: `data/trends.json` — a mock trend report simulating aggregator data from runway shows, TikTok fashion hashtags, and retail search volume, updated seasonally):
+
+| Dimension | What's checked | Source field in trends.json |
+|---|---|---|
+| Style tag overlap | How many of the item's `style_tags` appear in the trending styles list | `trending_styles` |
+| Color overlap | How many of the item's `colors` are trending this season | `trending_colors` |
+| Category signal | Whether the item's `category` is a hot category right now | `trending_categories` |
+| Hot-item match | Whether any hot-item name appears in the item's title or style tags | `hot_items` |
+| Material mentions | Whether the item's `description` mentions any trending materials | `trending_materials` |
+
+Each matched dimension becomes one sentence in the output. The total count determines the heat tier:
+
+| Signals | Tier |
+|---|---|
+| 0 | Neutral — "timeless piece" note |
+| 1 | "- Mildly on trend" |
+| 2–3 | "> On trend" |
+| 4+ | ">> Very on trend" |
+
+The `season` and `runway_notes` from `trends.json` provide context but are not directly scored.
+
+**Influence on outfit suggestion:** The trend assessment is injected into the `suggest_outfit` LLM prompt as a `trend_snippet`:
+
+> *"Current trend context: > On trend (3 signals for Spring 2026): y2k, vintage, cottagecore styles are trending... Work this trend awareness into the outfit suggestion naturally — mention why the item feels timely or how to lean into the trend with the suggested pairings."*
+
+This causes the LLM to reference trend alignment directly in its outfit suggestion, e.g., *"This Y2K baby tee is right on time for the vintage revival — pair it with..."*
+
+---
+
 ## Planning Loop
 
 The planning loop in [`run_agent()`](agent.py#L199-L284) follows a fixed 8-step sequence (full design documented in [planning.md](planning.md)):
@@ -299,6 +355,7 @@ All state for a single user interaction lives in **one `session` dict**, created
 | `search_results`    | Step 3 (`search_listings`)      | `list[dict]`   | All matching listings, best match first                              |
 | `selected_item`     | Step 4                          | `dict \| None` | `search_results[0]` — fed into price_comparison and both LLM tools   |
 | `price_assessment`  | Step 5 (`price_comparison`)     | `str \| None`  | Price comparison vs. similar listings; shown in the listing panel    |
+| `trend_info`        | Step 5a (`trend_analysis`)      | `str \| None`  | Trend assessment; injected into `suggest_outfit` and shown in listing panel |
 | `wardrobe`          | `_new_session`                  | `dict`         | The user's wardrobe (`{"items": [...]}`)                             |
 | `outfit_suggestion` | Step 6 (`suggest_outfit`)       | `str \| None`  | Outfit advice; becomes the `outfit` argument to `create_fit_card`    |
 | `fit_card`          | Step 7 (`create_fit_card`)      | `str \| None`  | The shareable caption                                                |
@@ -309,11 +366,14 @@ All state for a single user interaction lives in **one `session` dict**, created
 ```
 parsed → search_listings → search_results → selected_item
                                                 ├→ price_comparison → price_assessment
+                                                ├→ trend_analysis → trend_info
                                                 ├→ suggest_outfit → outfit_suggestion
                                                 └────────────────→ create_fit_card → fit_card
 ```
 
 The `selected_item` dict is reused as the `new_item` argument for both LLM tools, and `wardrobe` is read directly from the session rather than passed around separately. The caller (Gradio UI or CLI test) checks `session["error"]` first — if it is not `None`, the interaction ended early and `outfit_suggestion` / `fit_card` remain `None`.
+
+**Cross-interaction state** is handled by a separate `StyleProfile` singleton (see [Style Profile Memory](#style-profile-memory)) — it lives outside the session dict so it persists across multiple calls to `run_agent()`. After each successful interaction, the agent records the selected item's tags, category, and the query into the profile. The profile is then passed into `suggest_outfit` so the next interaction can reference learned preferences without the user re-entering them.
 
 ---
 
@@ -331,6 +391,55 @@ The function signature and return type are unchanged from the original design:
 def _parse_query(query: str) -> dict:
     """Returns {"description": str, "size": str | None, "max_price": float | None}."""
 ```
+
+---
+
+## Style Profile Memory
+
+FitFindr remembers style preferences across interactions so the user doesn't have to re-enter their tastes on every search. After a successful query, the agent records the selected item's style tags, category, size, and the query itself into a profile. The next time the user searches for something different, the outfit suggestion automatically references those learned preferences.
+
+### Storage Approach
+
+Preferences are stored in a **`StyleProfile` object** ([style_profile.py](style_profile.py)) that lives in memory:
+
+| What is stored | How it's accumulated |
+|---|---|
+| `style_tags` | Every unique style tag from items the user has viewed (e.g., `"vintage"`, `"grunge"`, `"y2k"`) |
+| `categories` | Categories the user has browsed (e.g., `"tops"`, `"outerwear"`) |
+| `search_history` | Past query strings, in order |
+| `item_titles` | Titles of selected items |
+| `preferred_size` | The most recently used size from a parsed query |
+
+The profile is a **module-level singleton** accessed via `get_profile()`. It is updated inside `run_agent()` at Step 4a — immediately after the item is selected and before `suggest_outfit` is called. A `summary()` method condenses the profile into a compact string (e.g., *"Style preferences (from past searches): y2k, vintage, graphic tee \| Browses: tops \| Past searches: ..."*) that is injected into the `suggest_outfit` LLM prompt so the stylist can reference established tastes.
+
+For the Gradio UI, the singleton is wrapped in a **`gr.State()`** so it survives across button clicks within one browser session. The `handle_query` function accepts the state as an input and returns it as an output, keeping Gradio's internal state in sync with the global profile.
+
+### Demonstration: Two Interactions Without Re-Entry
+
+**Interaction 1** — user searches for `"looking for a vintage graphic tee under $30"`:
+
+```
+Profile after: Style preferences (from past searches): y2k, vintage,
+               graphic tee, cottagecore | Browses: tops
+```
+
+**Interaction 2** — user searches for `"black leather jacket size M under 100"` (no mention of vintage, y2k, or graphic tees):
+
+```
+Profile after: Style preferences (from past searches): y2k, vintage,
+               graphic tee, cottagecore, 90s, leather, classic, grunge |
+               Browses: tops, outerwear | Typical size: M
+```
+
+The outfit suggestion for Interaction 2 **automatically references the first interaction's preferences** without the user re-entering anything:
+
+> *"The 90s Leather Bomber would be a great addition to your wardrobe, especially given your past searches for a black leather jacket. You can pair it with the Baggy straight-leg jeans and the White ribbed tank top for a classic 90s-inspired look. ... Both of these combinations align with your preferred styles, including 90s, vintage, and grunge aesthetics."*
+
+Key behaviors:
+- Style tags from Interaction 1 (`y2k`, `vintage`, `graphic tee`, `cottagecore`) persisted into Interaction 2's profile
+- The size `"M"` from Interaction 2 was stored as the preferred size
+- The outfit suggestion mentioned `"vintage and grunge aesthetics"` — a direct carry-over from Interaction 1
+- No user re-entry: the second query was just `"black leather jacket size M under 100"` with no mention of vintage styles
 
 ---
 
@@ -400,6 +509,23 @@ Output: "Found this Vintage Band Tee on depop for $22.0 and had to grab it.
 Item:  Y2K Baby Tee, $18.00, category=tops, style_tags=[y2k, vintage, graphic tee, butterfly]
 Output: "Price assessment: At $18.00, this Y2K Baby Tee is a great deal.
          Compared against 14 similar tops listings (average $22.00, range $15.00–$35.00)."
+```
+
+### Tool: `trend_analysis`
+
+| Failure mode | What the tool does | What the agent does | What the user sees |
+|---|---|---|---|
+| Trends file missing or malformed | Raises `FileNotFoundError` or `JSONDecodeError` on first load (cached thereafter). | The exception propagates — this is a startup/data-integrity issue, not a runtime one. | N/A (would prevent the app from launching). |
+| Zero trend signals matched | Returns a neutral note: *"Trend check: This [item] doesn't hit any specific trending signals this season — it's a timeless piece..."* | Unaware — receives a normal string. Passes it to `suggest_outfit`. | The listing panel shows the neutral trend note. The LLM still sees it as trend context. |
+
+**Concrete example:**
+
+```
+Item:  Slim-fit Oxford Shirt, category=tops, style_tags=[classic, minimalist, preppy]
+       colors=[white, light blue], no hot-item matches, no trending materials in description
+Output: "Trend check: This Slim-fit Oxford Shirt doesn't hit any specific
+         trending signals this season — it's a timeless piece that works
+         regardless of what's hot right now."
 ```
 
 ### Query Parsing (`_parse_query`)
