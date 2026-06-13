@@ -25,7 +25,7 @@ import re
 from dotenv import load_dotenv
 from groq import Groq
 
-from tools import search_listings, suggest_outfit, create_fit_card
+from tools import search_listings, suggest_outfit, create_fit_card, price_comparison
 
 load_dotenv()
 
@@ -187,6 +187,7 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "parsed": {},                # extracted description / size / max_price
         "search_results": [],        # list of matching listing dicts
         "selected_item": None,       # top result, passed into suggest_outfit
+        "price_assessment": None,    # price comparison vs. similar listings
         "wardrobe": wardrobe,        # user's wardrobe dict
         "outfit_suggestion": None,   # string returned by suggest_outfit
         "fit_card": None,            # string returned by create_fit_card
@@ -224,19 +225,23 @@ def run_agent(query: str, wardrobe: dict) -> dict:
         Step 3: Call search_listings() with the parsed parameters.
                 Store results in session["search_results"].
                 If no results: set session["error"] to a helpful message and
-                return the session early. Do NOT proceed to suggest_outfit
+                return the session early. Do NOT proceed to the remaining tools
                 with empty input.
 
         Step 4: Select the item to use (e.g., the top result).
                 Store it in session["selected_item"].
 
-        Step 5: Call suggest_outfit() with the selected item and wardrobe.
+        Step 5: Call price_comparison() with the selected item to get a
+                price assessment against similar listings.
+                Store the result in session["price_assessment"].
+
+        Step 6: Call suggest_outfit() with the selected item and wardrobe.
                 Store the result in session["outfit_suggestion"].
 
-        Step 6: Call create_fit_card() with the outfit suggestion and selected item.
+        Step 7: Call create_fit_card() with the outfit suggestion and selected item.
                 Store the result in session["fit_card"].
 
-        Step 7: Return the session.
+        Step 8: Return the session.
 
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
@@ -268,19 +273,24 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     # Step 4 — pick the top (highest-relevance) result.
     session["selected_item"] = session["search_results"][0]
 
-    # Step 5 — suggest an outfit (the tool handles the empty-wardrobe case).
+    # Step 5 — compare the item's price against similar listings.
+    session["price_assessment"] = price_comparison(
+        item=session["selected_item"],
+    )
+
+    # Step 6 — suggest an outfit (the tool handles the empty-wardrobe case).
     session["outfit_suggestion"] = suggest_outfit(
         new_item=session["selected_item"],
         wardrobe=session["wardrobe"],
     )
 
-    # Step 6 — build the shareable fit card (the tool guards an empty outfit).
+    # Step 7 — build the shareable fit card (the tool guards an empty outfit).
     session["fit_card"] = create_fit_card(
         outfit=session["outfit_suggestion"],
         new_item=session["selected_item"],
     )
 
-    # Step 7 — return the completed session.
+    # Step 8 — return the completed session.
     return session
 
 
@@ -298,6 +308,7 @@ if __name__ == "__main__":
         print(f"Error: {session['error']}")
     else:
         print(f"Found: {session['selected_item']['title']}")
+        print(f"Price assessment: {session['price_assessment']}")
         print(f"\nOutfit: {session['outfit_suggestion']}")
         print(f"\nFit card: {session['fit_card']}")
 

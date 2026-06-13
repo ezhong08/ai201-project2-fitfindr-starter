@@ -59,7 +59,7 @@ ai201-project2-fitfindr-starter/
 │   └── wardrobe_schema.json     # Wardrobe format + example wardrobe (10 items)
 ├── utils/
 │   └── data_loader.py           # Loaders for listings and wardrobes
-├── tools.py                     # Three standalone tool functions
+├── tools.py                     # Four standalone tool functions
 ├── agent.py                     # Query parser + planning loop (run_agent)
 ├── app.py                       # Gradio web interface
 ├── planning.md                  # Planning document (design decisions)
@@ -175,9 +175,48 @@ Example: _"Found this vintage Smiths tour tee on depop for $22 and it's everythi
 
 ---
 
+### Tool 4: `price_comparison`
+
+|             |                                                                                                             |
+| ----------- | ----------------------------------------------------------------------------------------------------------- |
+| **Purpose** | Compare a listing's price against similar items in the dataset and return an assessment with reasoning.     |
+| **File**    | [tools.py](tools.py#L262-L370)                                                                              |
+
+**Inputs:**
+
+| Parameter  | Type                   | Description                                                                                                                              |
+| ---------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `item`     | `dict`                 | The listing dict to assess. Reads `id`, `title`, `category`, `price`, `style_tags`, and `condition`.                                    |
+| `listings` | `list[dict] \| None`   | The dataset to compare against. Defaults to all 40 listings via `load_listings()` when `None`. Pass a subset to scope the comparison.   |
+
+**Output:** `str` — a one- to two-sentence price assessment with reasoning. Example:
+
+> *"Price assessment: At $22.00, this Vintage Band Tee is a good deal. Compared against 12 similar tops listings (average $27.13, range $8.00–$55.00). Among good-condition tops specifically (5 items), the average is $24.50."*
+
+**How comparisons are made:**
+
+1. **Same-category filter** — only listings in the same category (`"tops"`, `"bottoms"`, etc.) are considered comparable.
+2. **Self-exclusion** — the item is excluded by `id` so it never benchmarks against itself.
+3. **Style-tag scoring** — each candidate is scored by how many `style_tags` it shares with the item. Shared tags mean shared aesthetic (e.g., `"vintage"`, `"grunge"`), which makes them better price references. Only candidates with at least one overlapping tag are kept.
+4. **Statistics** — the average, minimum, and maximum price are computed across the comparable set, along with the count of comparables.
+5. **Condition-tier breakdown** — an optional condition-specific average is computed (e.g., all `"good"`-condition tops). This is surfaced only when it differs from the overall average by more than 10%, so the user sees whether condition explains a price difference.
+6. **Price-tier classification** — the item's price is classified into one of five tiers based on its ratio to the average:
+
+   | Ratio to average | Classification          |
+   | ---------------- | ----------------------- |
+   | < 85 %           | a great deal            |
+   | 85–95 %          | a good deal             |
+   | 95–105 %         | fairly priced           |
+   | 105–120 %        | slightly above market   |
+   | > 120 %          | above market            |
+
+**Failure case:** If no same-category listings exist (or the dataset is empty), returns a message like `"No comparable tops listings found in the dataset to assess the $22.00 price."` — never raises an exception.
+
+---
+
 ## Planning Loop
 
-The planning loop in [`run_agent()`](agent.py#L199-L284) follows a fixed 7-step sequence (full design documented in [planning.md](planning.md)):
+The planning loop in [`run_agent()`](agent.py#L199-L284) follows a fixed 8-step sequence (full design documented in [planning.md](planning.md)):
 
 ```
 User query + wardrobe
@@ -209,26 +248,32 @@ User query + wardrobe
 └──────┬───────┘   └──────────────────────┘
        ▼
 ┌─────────────────────────────────┐
-│ Step 5: Suggest outfit          │
+│ Step 5: Compare price           │
+│ price_comparison(item)          │
+│ → price_assessment string       │
+└──────────────┬──────────────────┘
+               ▼
+┌─────────────────────────────────┐
+│ Step 6: Suggest outfit          │
 │ suggest_outfit(item, wardrobe)  │
 │ (handles empty wardrobe inside) │
 └──────────────┬──────────────────┘
                ▼
 ┌─────────────────────────────────┐
-│ Step 6: Create fit card         │
+│ Step 7: Create fit card         │
 │ create_fit_card(outfit, item)   │
 │ (guards empty outfit inside)    │
 └──────────────┬──────────────────┘
                ▼
 ┌─────────────────────────────────┐
-│ Step 7: Return session          │
+│ Step 8: Return session          │
 │ {parsed, search_results,        │
-│  selected_item, outfit,         │
-│  fit_card, error}               │
+│  selected_item, price_assessment│
+│  outfit, fit_card, error}       │
 └─────────────────────────────────┘
 ```
 
-**The only branch the agent loop itself makes** is at Step 3: if `search_listings` returns an empty list, the agent sets `session["error"]` and returns immediately — `suggest_outfit` and `create_fit_card` are never called with empty input. Every other decision (empty wardrobe, empty outfit string) is handled inside the tool that encounters it, so the pipeline always reaches the return statement.
+**The only branch the agent loop itself makes** is at Step 3: if `search_listings` returns an empty list, the agent sets `session["error"]` and returns immediately — `price_comparison`, `suggest_outfit`, and `create_fit_card` are never called with empty input. Every other decision (empty wardrobe, empty outfit string, no comparables for price) is handled inside the tool that encounters it, so the pipeline always reaches the return statement.
 That having been said, inside the tools, there is often error handling, such as if there are no listings -- a generic but helpful message is usually returned.
 
 ### Decision Ownership Table
@@ -247,23 +292,25 @@ All state for a single user interaction lives in **one `session` dict**, created
 
 ### Session Fields
 
-| Field               | Set by                     | Type           | Purpose                                                              |
-| ------------------- | -------------------------- | -------------- | -------------------------------------------------------------------- |
-| `query`             | `_new_session`             | `str`          | The original, unmodified user request                                |
-| `parsed`            | Step 2 (`_parse_query`)    | `dict`         | `{"description", "size", "max_price"}` — inputs to `search_listings` |
-| `search_results`    | Step 3 (`search_listings`) | `list[dict]`   | All matching listings, best match first                              |
-| `selected_item`     | Step 4                     | `dict \| None` | `search_results[0]` — fed into both LLM tools                        |
-| `wardrobe`          | `_new_session`             | `dict`         | The user's wardrobe (`{"items": [...]}`)                             |
-| `outfit_suggestion` | Step 5 (`suggest_outfit`)  | `str \| None`  | Outfit advice; becomes the `outfit` argument to `create_fit_card`    |
-| `fit_card`          | Step 6 (`create_fit_card`) | `str \| None`  | The shareable caption                                                |
-| `error`             | Step 3 (on empty results)  | `str \| None`  | Set only on early exit; `None` on the success path                   |
+| Field               | Set by                          | Type           | Purpose                                                              |
+| ------------------- | ------------------------------- | -------------- | -------------------------------------------------------------------- |
+| `query`             | `_new_session`                  | `str`          | The original, unmodified user request                                |
+| `parsed`            | Step 2 (`_parse_query`)         | `dict`         | `{"description", "size", "max_price"}` — inputs to `search_listings` |
+| `search_results`    | Step 3 (`search_listings`)      | `list[dict]`   | All matching listings, best match first                              |
+| `selected_item`     | Step 4                          | `dict \| None` | `search_results[0]` — fed into price_comparison and both LLM tools   |
+| `price_assessment`  | Step 5 (`price_comparison`)     | `str \| None`  | Price comparison vs. similar listings; shown in the listing panel    |
+| `wardrobe`          | `_new_session`                  | `dict`         | The user's wardrobe (`{"items": [...]}`)                             |
+| `outfit_suggestion` | Step 6 (`suggest_outfit`)       | `str \| None`  | Outfit advice; becomes the `outfit` argument to `create_fit_card`    |
+| `fit_card`          | Step 7 (`create_fit_card`)      | `str \| None`  | The shareable caption                                                |
+| `error`             | Step 3 (on empty results)       | `str \| None`  | Set only on early exit; `None` on the success path                   |
 
 ### Data Flow
 
 ```
 parsed → search_listings → search_results → selected_item
-                                                    ├→ suggest_outfit → outfit_suggestion
-                                                    └────────────────→ create_fit_card → fit_card
+                                                ├→ price_comparison → price_assessment
+                                                ├→ suggest_outfit → outfit_suggestion
+                                                └────────────────→ create_fit_card → fit_card
 ```
 
 The `selected_item` dict is reused as the `new_item` argument for both LLM tools, and `wardrobe` is read directly from the session rather than passed around separately. The caller (Gradio UI or CLI test) checks `session["error"]` first — if it is not `None`, the interaction ended early and `outfit_suggestion` / `fit_card` remain `None`.
@@ -340,6 +387,21 @@ Output: "Found this Vintage Band Tee on depop for $22.0 and had to grab it.
          Pair the Vintage Band Tee with your baggy straight-leg jeans..."
 ```
 
+### Tool: `price_comparison`
+
+| Failure mode | What the tool does | What the agent does | What the user sees |
+|---|---|---|---|
+| No same-category listings in dataset | Returns a message like `"No comparable tops listings found in the dataset to assess the $22.00 price."` — never raises. | Does not branch. Stores the string and continues to `suggest_outfit`. | The listing panel shows the item details followed by the "no comparables" note. Outfit and fit card are unaffected. |
+| Zero style-tag overlap with any listing | Falls back to all same-category items (the `top_score > 0` guard). Comparison still runs against the broader category. | Unaware — receives a normal assessment string. | The price assessment may be less precise (category-based rather than style-based), but it's still informative. |
+
+**Concrete example:**
+
+```
+Item:  Y2K Baby Tee, $18.00, category=tops, style_tags=[y2k, vintage, graphic tee, butterfly]
+Output: "Price assessment: At $18.00, this Y2K Baby Tee is a great deal.
+         Compared against 14 similar tops listings (average $22.00, range $15.00–$35.00)."
+```
+
 ### Query Parsing (`_parse_query`)
 
 | Failure mode                                              | What the parser does                                                 | What the agent does                                                |
@@ -365,8 +427,8 @@ The planning document ([planning.md](planning.md)) specified:
 
 | Spec requirement              | Implementation                                                                               | Status     |
 | ----------------------------- | -------------------------------------------------------------------------------------------- | ---------- |
-| Three standalone tools        | All three implemented in [tools.py](tools.py) with the exact signatures from the spec        | ✅ Matches |
-| Planning loop with one branch | `run_agent()` follows the 7-step sequence; only branches on empty `search_results`           | ✅ Matches |
+| Standalone tools              | All four implemented in [tools.py](tools.py); `price_comparison` added as a stretch tool     | ✅ Matches |
+| Planning loop with one branch | `run_agent()` follows the 8-step sequence; only branches on empty `search_results`           | ✅ Matches |
 | Session dict state management | `_new_session()` initializes all 8 fields; each step reads/writes to `session`               | ✅ Matches |
 | Error handling per tool       | Every tool handles its failure mode internally (see [Error Handling](#error-handling) above) | ✅ Matches |
 | Gradio interface              | `app.py` with three output panels, example queries, and wardrobe selection                   | ✅ Matches |

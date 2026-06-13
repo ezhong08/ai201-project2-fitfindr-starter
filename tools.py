@@ -256,3 +256,122 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
             f"Found this {title} on {platform} for ${price} and had to grab it. "
             f"{outfit}"
         )
+
+
+# ── Tool 4: price_comparison ──────────────────────────────────────────────────
+
+def price_comparison(item: dict, listings: list[dict] | None = None) -> str:
+    """
+    Compare the price of a listing against similar items in the dataset
+    and return an assessment with reasoning.
+
+    Args:
+        item:     The listing dict to assess (must have category, price,
+                  style_tags, condition, and id).
+        listings: The full dataset to compare against. If None, loads from
+                  data_loader. Allows the caller to pass in pre-filtered
+                  results (e.g., the original search_results) for tighter
+                  comparison scoping.
+
+    Returns:
+        A string with a price assessment and reasoning — e.g.,
+        "At $22.00, this tee is a good deal — similar tops average $27.13
+        (range $8.00–$55.00). Among good-condition items the average is $24.50."
+
+    How comparisons are made:
+        1. Filter to the same category as the item (tops vs. tops, etc.).
+        2. Exclude the item itself (by id) so it doesn't benchmark against itself.
+        3. Score each candidate by style-tag overlap with the item — shared tags
+           mean shared aesthetic, which makes them better price references.
+        4. Keep only candidates with at least one overlapping tag (if any exist);
+           otherwise take all same-category items.
+        5. Calculate average, minimum, and maximum price across the comparable set.
+        6. Optionally compute a condition-specific average (e.g., "good" vs.
+           "excellent") and surface it when it differs meaningfully from the
+           overall average.
+        7. Classify the item's price into one of five tiers:
+           - "a great deal"    (< 85 % of average)
+           - "a good deal"     (85–95 % of average)
+           - "fairly priced"   (95–105 % of average)
+           - "slightly above market" (105–120 % of average)
+           - "above market"    (> 120 % of average)
+    """
+    if listings is None:
+        listings = load_listings()
+
+    category = item.get("category", "")
+    item_price = item.get("price", 0)
+    item_id = item.get("id", "")
+    item_tags = set(tag.lower() for tag in item.get("style_tags", []))
+    item_condition = item.get("condition", "")
+
+    # ── Find comparables ──────────────────────────────────────────────────
+    # Same category, exclude self, score by style-tag overlap.
+    comparables = []
+    for listing in listings:
+        if listing.get("id") == item_id:
+            continue
+        if listing.get("category") != category:
+            continue
+        listing_tags = set(tag.lower() for tag in listing.get("style_tags", []))
+        overlap = len(item_tags & listing_tags)
+        comparables.append((overlap, listing))
+
+    if not comparables:
+        return (
+            f"No comparable {category} listings found in the dataset "
+            f"to assess the ${item_price:.2f} price."
+        )
+
+    # Sort by tag overlap descending so better matches come first.
+    comparables.sort(key=lambda pair: pair[0], reverse=True)
+
+    # Keep only items with at least one overlapping tag, if any exist.
+    top_score = comparables[0][0]
+    if top_score > 0:
+        comparables = [(s, l) for s, l in comparables if s > 0]
+    # (If no item has any tag overlap, keep all same-category items.)
+
+    # ── Compute statistics ────────────────────────────────────────────────
+    prices = [l["price"] for _, l in comparables]
+    avg_price = sum(prices) / len(prices)
+    min_price = min(prices)
+    max_price = max(prices)
+    count = len(comparables)
+
+    # ── Condition-tier breakdown (when it differs meaningfully) ────────────
+    condition_prices = [
+        l["price"]
+        for _, l in comparables
+        if l.get("condition") == item_condition
+    ]
+    condition_note = ""
+    if condition_prices and len(condition_prices) >= 2:
+        cond_avg = sum(condition_prices) / len(condition_prices)
+        if abs(cond_avg - avg_price) / avg_price > 0.10:
+            condition_note = (
+                f" Among {item_condition}-condition {category} specifically "
+                f"({len(condition_prices)} items), the average is ${cond_avg:.2f}."
+            )
+
+    # ── Classify ──────────────────────────────────────────────────────────
+    ratio = item_price / avg_price if avg_price > 0 else 1.0
+    if ratio < 0.85:
+        tier = "a great deal"
+    elif ratio < 0.95:
+        tier = "a good deal"
+    elif ratio <= 1.05:
+        tier = "fairly priced"
+    elif ratio <= 1.20:
+        tier = "slightly above market"
+    else:
+        tier = "above market"
+
+    # ── Build response ────────────────────────────────────────────────────
+    return (
+        f"Price assessment: At ${item_price:.2f}, this "
+        f"{item.get('title', 'item')} is {tier}. "
+        f"Compared against {count} similar {category} listings "
+        f"(average ${avg_price:.2f}, range ${min_price:.2f}–${max_price:.2f})."
+        f"{condition_note}"
+    )
