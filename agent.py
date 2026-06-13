@@ -18,9 +18,16 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
+import json
+import os
 import re
 
+from dotenv import load_dotenv
+from groq import Groq
+
 from tools import search_listings, suggest_outfit, create_fit_card
+
+load_dotenv()
 
 
 # ── query parsing ─────────────────────────────────────────────────────────────
@@ -44,9 +51,78 @@ _WORD_SIZES = {
 }
 
 
+# Prompt for the LLM-based query parser.
+_PARSE_QUERY_PROMPT = """\
+You are a query parser for a secondhand fashion marketplace. Given a natural-language user query, extract structured search parameters.
+
+Return ONLY a valid JSON object with these keys:
+- "description": A space-separated string of meaningful item keywords. Remove filler words like "looking for", "find me", "I want", "please", "show me", "a", "the", "some", "me", "I'm", "I", "is there", "can you", "mostly", "wear", "wearing". Keep descriptors like colors, materials, styles, brands, and item types. Examples: "vintage graphic tee", "black leather jacket", "skinny jeans distressed", "cocktail dress midi formal"
+- "size": The clothing size as a canonical code if mentioned. Map word sizes to codes: "extra small"→"XS", "small"→"S", "medium"→"M", "large"→"L", "extra large"→"XL". If the user says "size medium" or just "medium", both map to "M". Keep numeric/raw sizes as-is (e.g., "W30", "US 7", "S/M", "XXS", "W28 L30"). Set to null if no size is mentioned.
+- "max_price": The budget ceiling as a number (no currency symbol). Extract from phrases like "under $30", "max 50", "cheaper than 25", "less than 100", "below 40", "< 20", "around 30", or bare "$30". Set to null if no price is mentioned.
+
+Examples:
+Query: "vintage graphic tee under $30, size M"
+Output: {"description": "vintage graphic tee", "size": "M", "max_price": 30}
+
+Query: "I'm looking for a black leather jacket, medium, max 100 dollars"
+Output: {"description": "black leather jacket", "size": "M", "max_price": 100}
+
+Query: "show me some skinny jeans size W28 under 40"
+Output: {"description": "skinny jeans", "size": "W28", "max_price": 40}
+
+Query: "find me a cocktail dress for a wedding"
+Output: {"description": "cocktail dress wedding", "size": null, "max_price": null}
+
+Query: "designer ballgown size XXS under $5"
+Output: {"description": "designer ballgown", "size": "XXS", "max_price": 5}
+
+Query: "I want a medium flannel shirt less than 25"
+Output: {"description": "flannel shirt", "size": "M", "max_price": 25}
+
+Query: "size extra small, yoga pants, max $35"
+Output: {"description": "yoga pants", "size": "XS", "max_price": 35}
+"""
+
+
 def _parse_query(query: str) -> dict:
     """
     Pull a description, optional size, and optional max_price out of a raw
+    natural-language query using an LLM (Groq).
+
+    Returns a dict: {"description": str, "size": str | None, "max_price": float | None}.
+    Falls back to a regex-based parser if the LLM call fails for any reason
+    (missing API key, network error, malformed response, etc.).
+    """
+    try:
+        api_key = os.environ.get("GROQ_API_KEY")
+        if not api_key:
+            raise ValueError("GROQ_API_KEY not set")
+        client = Groq(api_key=api_key)
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "user", "content": _PARSE_QUERY_PROMPT + "\n\nQuery: " + query}
+            ],
+            temperature=0.0,
+        )
+        raw = response.choices[0].message.content.strip()
+        # Strip markdown code fences if the model wraps the JSON in ```.
+        if raw.startswith("```"):
+            raw = raw.split("\n", 2)[-1].rsplit("```", 1)[0].strip()
+        result = json.loads(raw)
+        return {
+            "description": str(result.get("description", "")).strip(),
+            "size": result.get("size") if result.get("size") is not None else None,
+            "max_price": float(result["max_price"]) if result.get("max_price") is not None else None,
+        }
+    except Exception:
+        # Fall back to the regex parser on any failure.
+        return _parse_query_regex(query)
+
+
+def _parse_query_regex(query: str) -> dict:
+    """
+    [FALLBACK] Pull a description, optional size, and optional max_price out of a raw
     natural-language query using regular expressions.
 
     Returns a dict: {"description": str, "size": str | None, "max_price": float | None}.
@@ -168,7 +244,7 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     # Step 1 — create the session (single source of truth for this run).
     session = _new_session(query, wardrobe)
 
-    # Step 2 — parse the raw query into structured search parameters (regex).
+    # Step 2 — parse the raw query into structured search parameters (LLM with regex fallback).
     session["parsed"] = _parse_query(query)
 
     # Step 3 — search the listings, then branch on the result.
